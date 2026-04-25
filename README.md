@@ -62,3 +62,7 @@ systemctl start smartdns
 ```bash
 nslookup -querytype=ptr smartdns
 ```
+检测向443目标端口发送的UDP请求
+```bash
+sudo tcpdump -i any udp dst port 443 -nn
+```
