@@ -17,7 +17,29 @@ sudo apt update && sudo apt upgrade -y && sudo apt full-upgrade -y && sudo apt a
 ```
 修改SmartDNS.conf
 ```bash
-nano /etc/smartdns/smartdns.conf
+cat << EOF > /etc/smartdns/smartdns.conf
+bind :53
+bind-tcp :53
+
+force-AAAA-SOA yes
+dualstack-ip-selection no
+
+cache-size 4096
+prefetch-domain yes
+
+speed-check-mode tcp:443,tcp:80,ping
+
+server-h3 h3://cloudflare-dns.com/dns-query
+server-h3 h3://dns.google/dns-query
+
+server 8.8.8.8 -group bootstrap-dns
+nameserver /dns.google/bootstrap-dns
+nameserver /cloudflare-dns.com/bootstrap-dns
+
+serve-expired yes
+serve-expired-ttl 3600
+serve-expired-reply-ttl 3
+EOF
 ```
 安装dnsutils
 ```bash
