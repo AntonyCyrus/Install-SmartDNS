@@ -11,6 +11,10 @@ wget https://github.com/pymumu/smartdns/releases/download/Release47.1/smartdns.1
 ```bash
 dpkg -i smartdns.1.2025.11.09-1443.x86_64-debian-all.deb
 ```
+让 systemd 重新读取服务配置文件
+```bash
+systemctl daemon-reload
+```
 更新
 ```bash
 sudo apt update && sudo apt upgrade -y && sudo apt full-upgrade -y && sudo apt autoremove -y && sudo apt clean
@@ -18,8 +22,8 @@ sudo apt update && sudo apt upgrade -y && sudo apt full-upgrade -y && sudo apt a
 修改SmartDNS.conf
 ```bash
 cat << EOF > /etc/smartdns/smartdns.conf
-bind :53
-bind-tcp :53
+bind 127.0.0.1:53
+bind-tcp 127.0.0.1:53
 
 force-AAAA-SOA yes
 dualstack-ip-selection no
@@ -65,4 +69,13 @@ nslookup -querytype=ptr smartdns
 检测向443目标端口发送的UDP请求
 ```bash
 sudo tcpdump -i any udp dst port 443 -nn
+```
+安装iptables
+```bash
+apt install iptables
+```
+关闭53端口公网访问
+```bash
+sudo iptables -I INPUT -p udp --dport 53 -j DROP
+sudo iptables -I INPUT -p tcp --dport 53 -j DROP
 ```
