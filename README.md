@@ -74,8 +74,9 @@ sudo tcpdump -i any udp dst port 443 -nn
 ```bash
 apt install iptables
 ```
-关闭53端口公网访问
+关闭53端口公网访问（但是放行本地回环）
 ```bash
-sudo iptables -I INPUT -p udp --dport 53 -j DROP
-sudo iptables -I INPUT -p tcp --dport 53 -j DROP
+sudo iptables -I INPUT 1 -i lo -j ACCEPT
+sudo iptables -I INPUT 2 -p udp --dport 53 -j DROP
+sudo iptables -I INPUT 3 -p tcp --dport 53 -j DROP
 ```
