@@ -80,3 +80,7 @@ sudo iptables -I INPUT 1 -i lo -j ACCEPT
 sudo iptables -I INPUT 2 -p udp --dport 53 -j DROP
 sudo iptables -I INPUT 3 -p tcp --dport 53 -j DROP
 ```
+验证规则是否生效
+```bash
+sudo iptables -L INPUT -n -v --line-numbers
+```
