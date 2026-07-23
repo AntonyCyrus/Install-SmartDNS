@@ -9,7 +9,7 @@ wget https://github.com/pymumu/smartdns/releases/download/Release48.2/smartdns.1
 ```
 安装
 ```bash
-dpkg -i smartdns.1.2025.11.09-1443.x86_64-debian-all.deb
+dpkg -i smartdns.1.2026.06.28-1614.x86_64-debian-all.deb
 ```
 让 systemd 重新读取服务配置文件
 ```bash
