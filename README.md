@@ -1,6 +1,6 @@
-# Debian 13 VPS 安装 SmartDNS（完善版）
+# Debian 13 VPS 安装 SmartDNS
 
-> 基于 [AntonyCyrus/Install-SmartDNS](https://github.com/AntonyCyrus/Install-SmartDNS) 的原教程整理。适用目标：**Debian 13、systemd、amd64 VPS，仅为本机提供 DNS、使用 Cloudflare / Google 的 DoH3 上游**。本教程不要求全面升级 Debian，也不默认锁定 `/etc/resolv.conf`。
+> 适用目标：**Debian 13、systemd、amd64 VPS，仅为本机提供 DNS、使用 Cloudflare / Google 的 DoH3 上游**。本教程不要求全面升级 Debian，也不默认锁定 `/etc/resolv.conf`。
 >
 > **阅读方式：** 第 1–6 步为共同步骤；第 7 步根据检测结果**仅选择适用的分支**；第 8 步验证；故障时按第 10 步中**对应的分支**回滚。
 
