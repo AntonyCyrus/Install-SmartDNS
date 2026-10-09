@@ -9,15 +9,13 @@ wget https://github.com/pymumu/smartdns/releases/download/Release48.2/smartdns.1
 ```
 安装
 ```bash
-dpkg -i smartdns.1.2026.06.28-1614.x86_64-debian-all.deb
+sudo apt-get update
+sudo apt-get install -y \
+  ./smartdns.1.2026.08.05-0921.x86_64-debian-all.deb
 ```
 让 systemd 重新读取服务配置文件
 ```bash
 systemctl daemon-reload
-```
-更新
-```bash
-sudo apt update && sudo apt upgrade -y && sudo apt full-upgrade -y && sudo apt autoremove -y && sudo apt clean
 ```
 修改SmartDNS.conf
 ```bash
