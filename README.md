@@ -294,53 +294,56 @@ sudo journalctl -u smartdns -n 30 --no-pager
 
 ### 8A. 双 SSH 窗口验证 DoH3 的 UDP/443 出站流量（推荐）
 
-SmartDNS 配置了 Cloudflare 和 Google 的 `server-h3` 上游。HTTP/3 基于 QUIC，通常通过 **UDP 443** 传输。可以在 VPS 上开两个 SSH 连接：第一个运行 `tcpdump` 抓包，第二个用 `ping` 对一个**此前未查询过的子域名**触发 DNS 解析。
+本教程通过域名配置上游：`h3://cloudflare-dns.com/dns-query` 和 `h3://dns.google/dns-query`。SmartDNS 会先解析上游域名，再向选定的目标 IP 建立 QUIC/HTTP/3 连接。**不要把目标 IP 限死为 `1.1.1.1`、`1.0.0.1`、`8.8.8.8`、`8.8.4.4`**：它们是常见公共 DNS 地址，但未必就是上述域名此刻使用的 HTTP/3 目标地址。Anycast 是多个节点共享同一目标 IP 的路由机制，并不等于每次访问都会切换 IP。
 
-> **判读边界：** `tcpdump` 能证明 VPS 向某个 IP 的 UDP/443 发包，不能仅凭端口判定加密载荷一定是 DNS 查询，也不能证明查询已被对应上游成功处理。两家服务器可能只用到其中一家，取决于 SmartDNS 的选路、缓存、地址解析和网络情况。若要进一步核实，应结合 SmartDNS 日志、连接目标及解析结果。
+以下方法不预设 Cloudflare/Google 的目标地址，适用于 IPv4 和 IPv6：
 
-**SSH 窗口一：开始监听（先运行并保持打开）。** 先使用不过度限制目的 IP 的过滤器，以免上游服务域名解析到与常见公共 DNS 地址不同的 IP 时漏抓：
-
-```bash
-sudo tcpdump -ni any -tttt -vv 'udp and dst port 443'
-```
-
-只想查看**发往 Cloudflare / Google 常见公共 DNS IP** 的 UDP/443 时，可以改用更严格的过滤器（按 `Ctrl+C` 停止上一条后运行）：
+**SSH 窗口一：先开启抓包，保持窗口运行。**
 
 ```bash
-sudo tcpdump -ni any -tttt -vv 'udp and dst port 443 and (dst host 1.1.1.1 or dst host 1.0.0.1 or dst host 8.8.8.8 or dst host 8.8.4.4)'
+sudo tcpdump -ni any -nn -tttt 'udp and dst port 443'
 ```
 
-注意：上面四个 IP 是常见 DNS 服务地址，**不保证** `cloudflare-dns.com` / `dns.google` 的 DoH3 连接一定使用这些地址，因此严格过滤结果为空不代表 DoH3 没有工作。Cloudflare、Google 之外的应用也可能产生 UDP/443 流量；必要时先关闭其他持续联网的程序并结合源进程、时间和目的地址排查。
+`-n` 避免抓包工具自身反向解析地址；过滤条件仅匹配发往 **UDP 443** 的包，因此不会因为上游 DNS 域名解析到其他 IP 而漏掉流量。`any` 会监听本机多个接口，若流量通过 VPN/代理封装，可能需要到对应接口另行观察。停止抓包按 `Ctrl+C`。
 
-**SSH 窗口二：触发新的 DNS 查询。** 推荐对**自己拥有的独立域名**生成一次性子域名（把 `example.net` 替换成实际拥有的域名；最好确保它不是通配符解析）：
+**SSH 窗口二：直接向 SmartDNS 发起一次新的 DNS 查询。** 将 `example.net` 换成**自己控制的域名**（最好配置可响应任意随机子域名的通配符记录，以便得到成功应答）：
 
 ```bash
 TEST_DOMAIN="probe-$(date +%s)-$$.example.net"
-ping -4 -c 1 "$TEST_DOMAIN"
-```
-
-这里 `ping` 主要用于**触发 DNS 解析**。随机子域名不存在时，出现 `Name or service not known` 或类似错误是正常的；这不等于查询没有发出。若域名存在但禁用 ICMP，即使丢包也不代表 DNS 失败。也可以用 `dig` 更清楚地查看 DNS 响应：
-
-```bash
 dig @127.0.0.1 "$TEST_DOMAIN" A +time=5 +tries=2
 ```
 
-**不拥有独立域名时**，可以使用为文档预留的 `example.com` 生成临时测试名称，仅用于基本排查（结果一般为 `NXDOMAIN`）：
+如果只是检查是否向上游发包、没有自有域名，也可用保留示例域名触发一次查询：
 
 ```bash
-TEST_DOMAIN="probe-$(date +%s)-$$.example.com"
-ping -4 -c 1 "$TEST_DOMAIN"
-dig @127.0.0.1 "$TEST_DOMAIN" A +time=5 +tries=2
+dig @127.0.0.1 "probe-$(date +%s)-$$.example.com" A +time=5 +tries=2
 ```
 
-**如何理解结果：**
+随机名称用于尽量减少缓存命中；`example.com` 的随机子域名可能得到 `NXDOMAIN`，不等于 DNS 查询失败。相比 `ping`，`dig @127.0.0.1` 能明确指定查询 SmartDNS，并显示 DNS 响应状态。若仍想用 `ping`，请先确认系统默认 DNS 已经指向 SmartDNS，且不要把 ICMP 回显结果当作 DNS 成功与否的证据。
 
-- 窗口一出现 `IP 本机地址.临时端口 > 1.1.1.1.443: UDP`、`> 8.8.8.8.443: UDP` 或其他经核实属于对应 DoH3 服务的目标 IP，表示观察到了相应方向的 UDP/443 流量。
-- 只有 `ping` 提示无法解析，而抓包出现 UDP/443：可能是正常的不存在域名（`NXDOMAIN`）；以 `dig` 的状态码和 SmartDNS 日志进一步判断。
-- **没有抓到 UDP/443**：可能是缓存命中、上游连接未建立、目标 IP 不在严格过滤名单、流量经代理/隧道转发、上游故障或实际未发起查询。改用第一条宽松过滤命令、换一个新域名，再检查 `sudo journalctl -u smartdns -n 100 --no-pager`。
-- **抓到了 UDP/443 但解析失败**：可能是 QUIC 握手、网络或上游问题；抓包本身不是解析成功证明。
+**核对流量是否确实来自 SmartDNS：** 在窗口二额外执行：
 
-抓包结束后，在窗口一按 `Ctrl+C`，查看 `tcpdump` 汇总统计。不要长期公开保存完整抓包文件；目的 IP、查询时序等也可能泄露网络使用情况。
+```bash
+sudo ss -uapn | grep -i smartdns
+```
+
+`ss` 可在某些情况下显示 SmartDNS 进程关联的 UDP socket 及远端地址；由于 UDP 无连接、socket 可能未绑定特定远端，**没有显示远端 IP 不代表没有 DoH3 流量**。也可以辅助比较下面的域名解析结果：
+
+```bash
+getent ahostsv4 cloudflare-dns.com
+getent ahostsv4 dns.google
+```
+
+这些结果仅作参考：系统解析结果可能与 SmartDNS 启动时的 bootstrap 解析结果不同，也可能与其最终选用的 IPv6 地址不同，**不能用来建立唯一可靠的抓包过滤名单**。
+
+**判读结果：**
+
+- 抓到出站 UDP/443，且时间与 `dig` 查询吻合：说明存在符合 DoH3 传输特征的流量，**但不能仅凭 UDP/443 证明载荷是 DNS，也不能证明对方是 Cloudflare 或 Google**；其他应用也可能使用 QUIC。
+- 同时确认目标地址属于配置的上游、SmartDNS 日志没有上游错误、`dig` 收到正常响应：可较有把握地认为 DoH3 已工作。必要时临时使用 SmartDNS 的 `log-level debug` 观察上游连接，验证完恢复原日志级别。日志位置和格式以实际安装配置为准。
+- 没抓到 UDP/443：先确认抓包已启动，再换随机域名查询；检查 SmartDNS 是否缓存命中、是否走代理或其他接口、上游网络是否阻断 UDP/443，以及 `sudo journalctl -u smartdns -n 100 --no-pager`。
+- **出现 UDP/443 但解析异常**：仍可能是 QUIC 握手失败、服务端不可用或 DNS 返回了正常的否定答复；需要结合 `dig` 状态和日志判断。
+
+> **验证边界：** `tcpdump` 只能看到 UDP 数据包的地址、端口和加密负载长度。要严格证明“某次 DNS 查询由 SmartDNS 通过指定的 DoH3 上游完成”，还需结合进程关联、SmartDNS 日志、已核实的连接目标及查询结果。不要把“抓到 UDP/443”等同于“已经证明 DoH3 生效”。
 
 ## 9. 更新 SmartDNS
 
