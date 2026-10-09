@@ -1,281 +1,302 @@
-# Debian 13 VPS 安装 SmartDNS
+# Debian 13 VPS 安装 SmartDNS（完善版）
 
-本教程适用于使用 `systemd` 的 Debian 13 VPS，目标是让 SmartDNS 仅为本机提供 DNS 解析，并使用 DoH3 上游服务器。
+> 基于 [AntonyCyrus/Install-SmartDNS](https://github.com/AntonyCyrus/Install-SmartDNS) 的原教程整理。适用目标：**Debian 13、systemd、amd64 VPS，仅为本机提供 DNS、使用 Cloudflare / Google 的 DoH3 上游**。本教程不要求全面升级 Debian，也不默认锁定 `/etc/resolv.conf`。
+>
+> **阅读方式：** 第 1–6 步为共同步骤；第 7 步根据检测结果**仅选择适用的分支**；第 8 步验证；故障时按第 10 步中**对应的分支**回滚。
 
-## 功能与限制
+## 功能、前提与限制
 
-- 仅监听 `127.0.0.1:53`，不会向公网开放 DNS 服务。
-- 使用 Cloudflare 和 Google 的 DoH3 服务作为上游。
-- 使用两个传统 DNS 地址作为 DoH3 域名的引导解析服务器；它们不会进入默认查询组。
-- 默认阻止 IPv6 `AAAA` 结果，适合没有 IPv6 网络的 VPS。
-- 安装包来自 SmartDNS 官方 GitHub Release，并使用 SHA-256 校验。
-- 本文使用手动下载的 `.deb` 包，因此 SmartDNS 不会随 `apt upgrade` 自动更新。
+- SmartDNS 只监听 `127.0.0.1:53`（UDP / TCP），不是公网递归 DNS 服务器。
+- DoH3 上游使用 Cloudflare、Google。配置中的传统 DNS 地址仅用于 DoH3 域名的 bootstrap 解析；**首次建立上游连接仍可能发生明文 DNS 查询**，不要将其误认为全程加密或匿名。
+- 默认将 IPv6 `AAAA` 查询处理为 SOA，适用于无需 IPv6 结果的 VPS；若服务器需要 IPv6，请按第 5 步调整。
+- 固定下载原教程使用的 `Release48.4`、并核验其给出的 SHA-256。**这是固定版本，不代表始终是最新版**。
+- 本地 `.deb` 安装**不会因为添加了这个教程而自动追踪 GitHub Release**。
+- 需要 root 权限或 `sudo`。若使用纯净 Debian root 帐户且无 sudo，请将下文命令的 `sudo` 去掉；若是普通帐户，应先以 root 安装并配置 sudo，确认该帐户拥有 sudo 权限。
+- 有特殊网络配置（自定义 VPN / Tailscale / 企业内网域名 / 多网卡 DNS / 特定云厂商控制面）时，不能直接照搬“覆盖所有 DNS”的配置。
 
-## 适用环境
-
-- Debian 13
-- `amd64` / `x86_64` 架构
-- 拥有 `root` 权限，或当前用户可以使用 `sudo`
-- 服务器使用 `systemd`
-
-本文命令可以逐段复制执行。若当前已经是 `root` 用户且系统没有安装 `sudo`，请删除命令开头的 `sudo`。
-
-## 一、检查系统环境
-
-检查系统架构：
+## 1. 检查系统与 DNS 现状（操作前）
 
 ```bash
 dpkg --print-architecture
-```
-
-预期输出：
-
-```text
-amd64
-```
-
-检查 PID 1 是否为 `systemd`：
-
-```bash
 ps -p 1 -o comm=
+cat /etc/os-release
 ```
 
-预期输出：
+应确认架构为 `amd64`、PID 1 为 `systemd`、发行版为 Debian 13。若不符合，请勿原样执行固定架构的下载命令。
 
-```text
-systemd
-```
-
-检查 53 端口是否已被其他程序占用：
+**先记录原来的 DNS 和配置来源：**
 
 ```bash
-sudo ss -lntup | grep -E '127\.0\.0\.1:53|0\.0\.0\.0:53|\[::\]:53' || true
+ls -ld /etc/resolv.conf
+readlink /etc/resolv.conf || true
+readlink -f /etc/resolv.conf || true
+cat /etc/resolv.conf 2>/dev/null || true
+systemctl is-active systemd-resolved NetworkManager systemd-networkd 2>/dev/null || true
 ```
 
-如果没有输出，可以继续。如果已有 `systemd-resolved`、`dnsmasq`、`named` 或其他 DNS 程序监听 53 端口，应先查明用途并解决端口冲突。
+如果 `/etc/resolv.conf` 不存在，请先确认网络管理配置；不要直接假设创建普通文件即可永久生效。
 
-## 二、安装必要工具
+**看懂 `ls -ld` 的结果：**
 
-这里只更新软件包索引并安装必要工具，不升级其他软件包：
+| 可能的输出（示例） | 判断依据 | 对应第 7 步 |
+| --- | --- | --- |
+| `-rw-r--r-- ... /etc/resolv.conf` | 首字符为 `-`，普通文件 | **7A**；仍要排查谁在维护它 |
+| `lrwxrwxrwx ... /etc/resolv.conf -> ../run/systemd/resolve/stub-resolv.conf` | 首字符为 `l`，指向 resolved 的 stub | **7B** |
+| `lrwxrwxrwx ... /etc/resolv.conf -> /run/systemd/resolve/resolv.conf` | 指向 resolved 的上游服务器列表 | **7B**；注意可能绕过 stub |
+| `lrwxrwxrwx ... /etc/resolv.conf -> ../run/resolvconf/resolv.conf` | 指向 resolvconf 生成文件 | **7D** |
+| `lrwxrwxrwx ... /etc/resolv.conf -> /run/NetworkManager/resolv.conf` | 指向 NetworkManager 生成文件 | **7C** |
+| `ls: cannot access ... No such file or directory` | 不存在；也可能是断链，需要进一步检查 | **7D** |
+
+上表的日期、字节数和箭头后的相对路径只是示例；**以实际链接目标及实际运行的管理程序为准**。`readlink -f` 能显示能解析的最终路径；对于断链，其结果不一定可靠。额外判断：
+
+```bash
+if [ -L /etc/resolv.conf ]; then
+  echo '符号链接'
+elif [ -f /etc/resolv.conf ]; then
+  echo '普通文件'
+else
+  echo '不存在、断链或其他文件类型：请手动排查'
+fi
+```
+
+**检查本机 53 端口（包含 IPv4、IPv6、UDP、TCP）：**
+
+```bash
+sudo ss -lntup '( sport = :53 )'
+```
+
+如果有输出，先确认绑定地址和进程：例如 `127.0.0.53:53`（systemd-resolved 的常见 stub）通常**不会与 `127.0.0.1:53` 冲突**；但 `0.0.0.0:53`、`127.0.0.1:53` 或覆盖对应 IPv6 地址的监听可能冲突。不要因为看到 `systemd-resolved` 就直接停用它。若已有 `dnsmasq`、`named`、AdGuard Home 等占用目标端口，先处理冲突再继续。
+
+## 2. 安装必要工具
+
+仅更新包索引、安装依赖，不执行整机升级或清理：
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y ca-certificates wget dnsutils
 ```
 
-## 三、下载并校验 SmartDNS
+`ss` 通常由 `iproute2` 提供；若系统提示找不到该命令：
 
-本教程固定使用官方稳定版 `Release48.4`：
+```bash
+sudo apt-get install -y iproute2
+```
+
+## 3. 下载并校验 SmartDNS
+
+沿用原教程固定版本 `Release48.4`：
 
 ```bash
 cd /tmp
-wget -O smartdns.deb https://github.com/pymumu/smartdns/releases/download/Release48.4/smartdns.1.2026.08.05-0921.x86_64-debian-all.deb
+wget -O smartdns.deb 'https://github.com/pymumu/smartdns/releases/download/Release48.4/smartdns.1.2026.08.05-0921.x86_64-debian-all.deb'
 ```
 
-校验 SHA-256：
+核验原教程提供的哈希：
 
 ```bash
 echo '4cc1b8f9db10110e1212d981cfee7eb89a3c80f5766760e3b5f7541c8da8b546  smartdns.deb' | sha256sum -c -
 ```
 
-必须看到以下结果后再继续：
+只有返回 `smartdns.deb: OK` 才可继续。若为 `FAILED`，立即停止安装，重新核对下载来源、文件名和发布者公布的校验信息。**哈希仅能证明与预期文件一致，不能单独证明软件绝对安全。**
 
-```text
-smartdns.deb: OK
-```
-
-如果显示 `FAILED`，不要安装该文件。请删除损坏的下载文件并重新下载。
-
-## 四、安装 SmartDNS
-
-使用 APT 安装本地 `.deb` 文件，以便自动处理依赖关系：
+## 4. 安装 SmartDNS
 
 ```bash
-sudo apt-get install -y ./smartdns.deb
-```
-
-查看已安装版本：
-
-```bash
+sudo apt-get install -y /tmp/smartdns.deb
 smartdns -v
 ```
 
-## 五、备份并写入配置
+若安装期间服务自动启动但尚未完成配置，稍后第 6 步会重启载入新配置。
 
-先备份软件包自带的配置文件：
+## 5. 备份并配置 SmartDNS
 
 ```bash
 sudo cp -a /etc/smartdns/smartdns.conf /etc/smartdns/smartdns.conf.package-default
-```
-
-写入配置：
-
-```bash
 sudo tee /etc/smartdns/smartdns.conf >/dev/null <<'EOF'
-# 仅监听本机回环地址，避免成为公网 DNS 服务器。
+# 仅向本机提供 DNS 服务。
 bind 127.0.0.1:53
 bind-tcp 127.0.0.1:53
 
-# 该 VPS 不使用 IPv6，因此让 AAAA 查询返回 SOA。
+# 本方案默认不需要 IPv6 AAAA 结果。
 force-AAAA-SOA yes
 dualstack-ip-selection no
 
-# 缓存与域名预取设置。
+# 缓存和预取。
 cache-size 4096
 prefetch-domain yes
 
-# 使用 TCP 443、TCP 80 和 ICMP 检查候选地址速度。
+# 候选地址测速。
 speed-check-mode tcp:443,tcp:80,ping
 
-# 仅用于解析 DoH3 服务器域名，不加入默认查询组。
+# 仅用于 bootstrap，不作为普通查询的默认上游。
 server 1.1.1.1 -bootstrap-dns -exclude-default-group
 server 8.8.8.8 -bootstrap-dns -exclude-default-group
 
-# 默认上游 DNS：Cloudflare 和 Google DoH3。
+# Cloudflare / Google DoH3。
 server-h3 h3://cloudflare-dns.com/dns-query
 server-h3 h3://dns.google/dns-query
 
-# 上游暂时不可用时，允许短时间返回过期缓存。
+# 暂时失联时使用短时间过期缓存。
 serve-expired yes
 serve-expired-ttl 3600
 serve-expired-reply-ttl 3
 EOF
 ```
 
-> [!NOTE]
-> 如果 VPS 可以正常使用 IPv6，并且你希望客户端获得 IPv6 地址，请删除 `force-AAAA-SOA yes` 和 `dualstack-ip-selection no` 两行。
+> 如果 VPS 需要 IPv6 AAAA 结果，请删去 `force-AAAA-SOA yes` 和 `dualstack-ip-selection no`。DoH3 需要出站 UDP/443；若此端口受限，应先解决上游连接，而不是贸然切换系统 DNS。
 
-## 六、启动并验证 SmartDNS
-
-启用 SmartDNS 开机启动，并立即重启服务以载入新配置：
+## 6. 启动并先测试 SmartDNS
 
 ```bash
 sudo systemctl enable smartdns
 sudo systemctl restart smartdns
-```
-
-查看服务状态：
-
-```bash
 sudo systemctl status smartdns --no-pager -l
 ```
 
-预期看到：
-
-```text
-Active: active (running)
-```
-
-在修改系统 DNS 以前，先明确指定 `127.0.0.1`，确认应答者确实是 SmartDNS：
+应看到 `Active: active (running)`。在切换默认 DNS **以前**，先执行：
 
 ```bash
+dig @127.0.0.1 debian.org A +time=3 +tries=2
+dig @127.0.0.1 cloudflare.com A +time=3 +tries=2
 nslookup -querytype=ptr smartdns 127.0.0.1
+sudo ss -lntup '( sport = :53 )'
 ```
 
-正常结果中应出现 `smartdns name = smartdns.`，或者显示当前主机名。这是官方验证方法的指定服务器版本；此时不能省略末尾的 `127.0.0.1`，因为系统默认 DNS 尚未切换到 SmartDNS。
-
-再执行普通域名查询，验证实际解析能力：
-
-```bash
-dig @127.0.0.1 debian.org A +short
-dig @127.0.0.1 cloudflare.com A +short
-```
-
-两条命令都应返回一个或多个 IPv4 地址。
-
-确认 53 端口只监听本机地址：
-
-```bash
-sudo ss -lntup | grep ':53'
-```
-
-输出中的监听地址应为 `127.0.0.1:53`，不应出现 `0.0.0.0:53` 或 `[::]:53`。
-
-如服务启动失败，查看日志：
+应返回 `NOERROR`、包含真实 IPv4 的答案，且 SmartDNS 仅监听 `127.0.0.1:53`。PTR 查询是辅助诊断，**不能替代真实域名测试**。启动异常时：
 
 ```bash
 sudo journalctl -u smartdns -n 100 --no-pager
 ```
 
-在上述测试成功以前，不要修改 `/etc/resolv.conf`。
+**以上测试未通过，停止操作，不要改 `/etc/resolv.conf`。**
 
-## 七、让本机使用 SmartDNS
+## 7. 让本机使用 SmartDNS：选择对应分支
 
-先检查 `/etc/resolv.conf` 是否为符号链接：
+建议远程 VPS 操作时保持现有 SSH 会话不退出，并提前确认云厂商控制台可用。**四个分支只执行相符的一个，不要顺序全做。**
 
-```bash
-ls -l /etc/resolv.conf
-```
+### 7A. 普通文件，且不受 DNS 管理服务自动覆盖
 
-### 情况 A：`/etc/resolv.conf` 是普通文件
-
-先备份：
+若 DHCP、cloud-init 等服务持续重写这个普通文件，请转到 7D，不要直接套用本分支。
 
 ```bash
 sudo cp -a /etc/resolv.conf /etc/resolv.conf.before-smartdns
-```
-
-再将本机 DNS 指向 SmartDNS：
-
-```bash
 printf 'nameserver 127.0.0.1\noptions timeout:2 attempts:2\n' | sudo tee /etc/resolv.conf >/dev/null
-```
-
-验证系统默认 DNS：
-
-```bash
-nslookup -querytype=ptr smartdns
-dig debian.org A +short
+cat /etc/resolv.conf
+dig debian.org A +time=3 +tries=2
 getent ahostsv4 debian.org
 ```
 
-第一条是 SmartDNS 官方提供的生效验证命令。正常结果中应出现 `smartdns name = smartdns.`，或者显示当前主机名；同时，命令开头显示的 DNS 服务器地址应为 `127.0.0.1`。
-
-### 情况 B：`/etc/resolv.conf` 是符号链接
-
-这通常表示 DNS 配置由 `systemd-resolved`、NetworkManager、云服务商初始化程序或其他网络管理器维护。此时不要直接删除链接，也不要直接覆盖文件；应在对应的网络管理器中把 DNS 设置为 `127.0.0.1`。
-
-可以先用下面的命令查看链接目标：
+如果失败，**立即恢复备份**：
 
 ```bash
-readlink -f /etc/resolv.conf
+sudo cp -a /etc/resolv.conf.before-smartdns /etc/resolv.conf
 ```
 
-不同 VPS 服务商的网络配置方式可能不同。在不了解管理程序前直接替换该链接，可能导致重启后 DNS 失效。
+不要默认执行 `chattr +i`，普通文件也可能由其他程序维护。
 
-> [!WARNING]
-> 不建议对 `/etc/resolv.conf` 执行 `chattr +i`。将文件锁定会阻止网络管理器正常更新 DNS，也会增加以后修改和排错的难度。
+### 7B. systemd-resolved 符号链接
 
-## 八、最终检查
+当 `systemd-resolved` 运行，且符号链接指向 `/run/systemd/resolve/...` 时，推荐保留 resolved，让其向 SmartDNS 转发查询。常见 stub `127.0.0.53:53` 与 SmartDNS `127.0.0.1:53` 可以分别监听。
 
-依次执行：
+检查：
+
+```bash
+systemctl is-active systemd-resolved
+resolvectl status
+ls -l /etc/resolv.conf
+```
+
+使用独立配置文件，避免修改软件包默认文件：
+
+```bash
+sudo mkdir -p /etc/systemd/resolved.conf.d
+sudo tee /etc/systemd/resolved.conf.d/90-smartdns.conf >/dev/null <<'RESOLVED_EOF'
+[Resolve]
+DNS=127.0.0.1
+Domains=~.
+FallbackDNS=
+RESOLVED_EOF
+sudo systemctl restart systemd-resolved
+```
+
+```bash
+resolvectl status
+resolvectl query debian.org
+dig debian.org A +time=3 +tries=2
+```
+
+**注意每链路 DNS：** DHCP、NetworkManager 和 systemd-networkd 可能设置独立 DNS 和路由域。全局 `DNS=127.0.0.1` 并不绝对保证所有查询都使用它。仔细检查 `resolvectl status`；若发现其他每链路 DNS 参与解析，应在对应的链路管理器中处理，尤其不要破坏 VPN 或内部域名的 DNS 路由。
+
+如果 `/etc/resolv.conf` 原来指向 `/run/systemd/resolve/resolv.conf`，应用程序可能绕过 stub 而读取上游列表。**仅当确认 `127.0.0.53` stub 可正常解析，且未配置 `DNSStubListener=no` 时**，可将链接切换为 stub 模式：
+
+```bash
+sudo cp -a /etc/resolv.conf /etc/resolv.conf.before-smartdns
+sudo ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+```
+
+原本已是 stub 链接则不必执行。改后继续执行第 8 步。
+
+### 7C. NetworkManager 管理 DNS
+
+先查找活动连接与网卡（不要猜连接名）：
+
+```bash
+nmcli device status
+nmcli -f NAME,UUID,DEVICE connection show --active
+```
+
+记录对应连接修改前的设置，用于以后回滚：
+
+```bash
+nmcli connection show '连接名称' | grep -E 'ipv4\.dns:|ipv4\.ignore-auto-dns|ipv6\.ignore-auto-dns'
+```
+
+把 `连接名称` 替换为实际名称，设置本机 DNS：
+
+```bash
+sudo nmcli connection modify '连接名称' ipv4.dns '127.0.0.1' ipv4.ignore-auto-dns yes
+```
+
+仅在需要忽略 IPv6 自动 DNS 时，再执行：
+
+```bash
+sudo nmcli connection modify '连接名称' ipv6.ignore-auto-dns yes
+```
+
+远程 VPS 上**不要轻易 down/up 网络连接**，以免断开 SSH。可尝试 `sudo nmcli device reapply '网卡设备名'`，但仍需按实际设备、NetworkManager 的 DNS 模式及是否接入 resolved 检查生效情况。执行 `nmcli device show`、`cat /etc/resolv.conf` 和（如适用）`resolvectl status`，再执行第 8 步。
+
+### 7D. resolvconf / cloud-init / DHCP / 不存在 / 断链 / 来源不明
+
+这些情形没有适用于所有发行版镜像和云平台的安全替换命令。先检查：
+
+```bash
+ls -ld /etc/resolv.conf
+readlink /etc/resolv.conf || true
+systemctl is-active systemd-resolved NetworkManager systemd-networkd 2>/dev/null || true
+ls -l /run/resolvconf/resolv.conf /etc/resolvconf/resolv.conf.d/ 2>/dev/null || true
+ls /etc/network/interfaces /etc/netplan/ /etc/cloud/cloud.cfg.d/ 2>/dev/null || true
+```
+
+确认实际负责重写 DNS 的管理程序后，在**该程序的持久化配置**中将 DNS 指向 `127.0.0.1` 并按其机制生效。不要未经核实就删除符号链接、强制建立普通文件，或对断链执行 `tee`；这可能将内容写到错误目标。
+
+## 8. 最终验收
 
 ```bash
 systemctl is-active smartdns
 systemctl is-enabled smartdns
-nslookup -querytype=ptr smartdns
-dig debian.org A +short
-sudo ss -lntup | grep ':53'
+sudo ss -lntup '( sport = :53 )'
+dig @127.0.0.1 debian.org A +time=3 +tries=2
+dig debian.org A +time=3 +tries=2
+getent ahostsv4 debian.org
+cat /etc/resolv.conf
 sudo journalctl -u smartdns -n 30 --no-pager
 ```
 
-正常情况下：
+预期 SmartDNS 是 `active` 与 `enabled`，指定地址和系统默认 DNS 查询均可正常返回 IPv4，且没有公网 53 端口意外监听。**7B 分支中，默认 DNS 显示 `127.0.0.53` 是正常的 resolved stub**；是否最终转发 SmartDNS，还需要检查 `resolvectl status`、每链路 DNS 和 SmartDNS 的解析活动。验证重启后持久性时，应提前准备云控制台回滚。
 
-- 前两条命令分别返回 `active` 和 `enabled`。
-- `nslookup` 结果中的 `name` 为 `smartdns` 或当前主机名。
-- DNS 查询返回 IPv4 地址。
-- SmartDNS 只监听 `127.0.0.1:53`。
-- 日志中没有持续重复的错误。
+## 9. 更新 SmartDNS
 
-## 更新 SmartDNS
-
-本教程安装的是从 GitHub 下载的本地 `.deb` 包，没有添加 APT 软件源。因此：
-
-- Debian 的定期 APT 更新任务不会自动更新 SmartDNS。
-- 更新时应从 [SmartDNS 官方 Releases](https://github.com/pymumu/smartdns/releases) 下载新版 `.deb`。
-- 安装新版前应核对文件名、版本和发布者提供的校验信息。
-
-下载新版安装包后，可以使用以下形式升级，并保留现有配置文件：
+由于采用本地 `.deb` 安装，没有自动跟随 GitHub Release 的更新渠道。更新时从 [官方 Releases](https://github.com/pymumu/smartdns/releases) 获取与系统架构相符的文件，核对发布者和校验信息，备份配置后运行（替换示例文件名）：
 
 ```bash
 cd /tmp
@@ -284,64 +305,47 @@ sudo systemctl restart smartdns
 sudo systemctl status smartdns --no-pager -l
 ```
 
-`新版-smartdns.deb` 是示例文件名，执行前必须替换为实际下载的文件名。
+更新后应重新验证解析；保留旧配置的选项并不能代替发行说明和兼容性检查。
 
-## 回滚 DNS 设置
+## 10. 回滚与卸载
 
-如果切换本机 DNS 后出现解析故障，且之前按照本文创建了备份，可执行：
+**先恢复系统可用的 DNS，确认成功后再停用 SmartDNS。不要颠倒顺序。**
+
+- **7A 普通文件：** `sudo cp -a /etc/resolv.conf.before-smartdns /etc/resolv.conf`，再测试 `dig debian.org A`。
+- **7B systemd-resolved：** 执行 `sudo rm -f /etc/systemd/resolved.conf.d/90-smartdns.conf` 和 `sudo systemctl restart systemd-resolved`。若第 7B 步额外改动了 resolv.conf 的符号链接，确认之前保存的是**原始链接**后，用 `sudo rm /etc/resolv.conf && sudo cp -a /etc/resolv.conf.before-smartdns /etc/resolv.conf` 恢复。测试 `resolvectl query debian.org`。
+- **7C NetworkManager：** 用修改前记录的值恢复连接的 `ipv4.dns`、`ipv4.ignore-auto-dns` 和实际修改过的 `ipv6.ignore-auto-dns`，必要时谨慎 reapply 网卡；远程操作不要猜原值或直接断开网络连接。
+- **7D 其他管理器：** 按原管理程序的备份/回滚流程操作，不适用固定的文件复制命令。
+
+确认 `dig debian.org A` 解析正常后：
 
 ```bash
-sudo cp -a /etc/resolv.conf.before-smartdns /etc/resolv.conf
 sudo systemctl disable --now smartdns
 ```
 
-然后测试：
+若要彻底卸载：
 
 ```bash
-getent ahostsv4 debian.org
-```
-
-如果你曾按照旧教程锁定 `/etc/resolv.conf`，需要先解除锁定：
-
-```bash
-sudo chattr -i /etc/resolv.conf
-```
-
-## 卸载 SmartDNS
-
-先恢复原 DNS 配置，再卸载软件包：
-
-```bash
-sudo cp -a /etc/resolv.conf.before-smartdns /etc/resolv.conf
-sudo systemctl disable --now smartdns
 sudo apt-get purge -y smartdns
 ```
 
-如果备份文件不存在，请不要直接复制；先为服务器设置一个可用的 DNS，再卸载 SmartDNS。
+如果旧教程曾对**普通文件** `/etc/resolv.conf` 设置 `chattr +i`，恢复前可能需先 `sudo chattr -i /etc/resolv.conf`；不要对未知符号链接目标盲目操作。
 
-## 为什么不执行全面升级
+## 11. 系统维护与安全说明
 
-安装 SmartDNS 只需要安装它自身及必要依赖。以下命令属于整台 Debian 系统的维护操作，不是安装 SmartDNS 的必要步骤：
+安装 SmartDNS 本身不需要执行 `apt-get upgrade`、`full-upgrade`、`autoremove` 或 `clean`。这些属于独立的系统维护；正常的 Debian 安全更新仍应按维护策略执行。
 
-```bash
-sudo apt-get upgrade
-sudo apt-get full-upgrade
-sudo apt-get autoremove
-sudo apt-get clean
-```
+- 不要在未设置访问控制时把 SmartDNS 监听改为 `0.0.0.0:53`。
+- 不要从不明来源下载安装包。
+- DNS-over-HTTPS/3 负责上游传输加密，不等于匿名，公共 DNS 服务方仍可能接触查询数据。
+- 不建议锁死 `/etc/resolv.conf`；尤其不要破坏由管理程序自动生成的文件。
+- 先测试 `dig @127.0.0.1`，再切换系统默认 DNS；保持 SSH 登录并预备控制台恢复。
 
-其中 `full-upgrade` 可能安装新包或移除已有软件包，应由独立的系统维护计划执行。不要把它与单个应用的安装教程捆绑运行。
+## 参考资料
 
-## 官方资料
-
-- [SmartDNS GitHub 仓库](https://github.com/pymumu/smartdns)
-- [SmartDNS 官方 Releases](https://github.com/pymumu/smartdns/releases)
-- [SmartDNS 配置示例](https://github.com/pymumu/smartdns/blob/master/etc/smartdns.conf)
-- [Debian APT 使用手册](https://www.debian.org/doc/manuals/debian-handbook/apt.zh-cn.html)
-
-## 安全提醒
-
-- 不要将 SmartDNS 绑定到 `0.0.0.0:53`，除非你明确需要为其他设备提供 DNS，并已经设置访问控制和防火墙。
-- 不要从不明网站下载 `.deb` 安装包。
-- 修改 DNS 前先完成 `dig @127.0.0.1` 测试。
-- 建议保留一个已登录的 SSH 会话，确认新 DNS 正常后再断开连接。
+- [原教程](https://github.com/AntonyCyrus/Install-SmartDNS)
+- [SmartDNS 官方仓库](https://github.com/pymumu/smartdns)
+- [SmartDNS Releases](https://github.com/pymumu/smartdns/releases)
+- [SmartDNS 官方配置示例](https://github.com/pymumu/smartdns/blob/master/etc/smartdns.conf)
+- [systemd-resolved 配置文档](https://www.freedesktop.org/software/systemd/man/latest/resolved.conf.html)
+- [NetworkManager nmcli 文档](https://networkmanager.dev/docs/api/latest/nmcli.html)
+- [Debian APT 手册](https://www.debian.org/doc/manuals/debian-handbook/apt.zh-cn.html)
