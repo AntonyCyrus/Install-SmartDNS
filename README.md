@@ -5,7 +5,7 @@ sudo apt update && sudo apt upgrade -y && sudo apt full-upgrade -y && sudo apt a
 ```
 下载SmartDNS对应版本安装包
 ```bash
-wget https://github.com/pymumu/smartdns/releases/download/Release48.2/smartdns.1.2026.06.28-1614.x86_64-debian-all.deb
+wget https://github.com/pymumu/smartdns/releases/download/Release48.4/smartdns.1.2026.08.05-0921.x86_64-debian-all.deb
 ```
 安装
 ```bash
